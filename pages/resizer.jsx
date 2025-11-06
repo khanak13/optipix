@@ -1,5 +1,5 @@
 "use client";
-import React, { useState, useRef } from "react";
+import React, { useState } from "react";
 import JSZip from "jszip";
 import { SparklesCore } from "@/components/ui/sparkles";
 import { FileUpload } from "@/components/ui/file-upload";
@@ -15,62 +15,74 @@ export default function ResizerPage() {
   const [quality, setQuality] = useState(85);
   const [files, setFiles] = useState([]);
   const [processing, setProcessing] = useState(false);
-  const [totalSaved, setTotalSaved] = useState(null);
+  const [progress, setProgress] = useState(0);
   const [resetKey, setResetKey] = useState(0);
 
   const addFiles = (newFiles) => {
-    const mapped = newFiles.map((f) => ({
+    const mapped = newFiles.map((file) => ({
       id: crypto.randomUUID(),
-      file: f,
-      previewUrl: URL.createObjectURL(f),
+      file,
+      previewUrl: URL.createObjectURL(file),
+      resultBlob: null,
     }));
-    setFiles((p) => [...p, ...mapped]);
+
+    setFiles((prev) => [...prev, ...mapped]);
+  };
+
+  const removeFile = (id) => {
+    setFiles((prev) => prev.filter((f) => f.id !== id));
   };
 
   const resetAll = () => {
     files.forEach((f) => URL.revokeObjectURL(f.previewUrl));
     setFiles([]);
-    setTotalSaved(null);
+    setProcessing(false);
+    setProgress(0);
     setResetKey((k) => k + 1);
   };
 
-  const removeFile = (id) =>
-    setFiles((p) => p.filter((x) => x.id !== id));
-
   const processAll = async () => {
+    if (files.length === 0) return;
+
     setProcessing(true);
-    let o = 0, n = 0;
+    setProgress(0);
 
-    const processed = await Promise.all(
-      files.map(async (item) => {
-        const fd = new FormData();
-        fd.append("file", item.file);
-        fd.append("width", PRESETS[preset].w);
-        fd.append("height", PRESETS[preset].h);
-        fd.append("quality", quality);
+    let doneCount = 0;
+    const updated = [];
 
-        const res = await fetch("/api/process", { method: "POST", body: fd });
-        const blob = await res.blob();
-        const metrics = JSON.parse(res.headers.get("x-metrics") || "{}");
+    for (const file of files) {
+      const form = new FormData();
+      form.append("file", file.file);
+      form.append("width", PRESETS[preset].w);
+      form.append("height", PRESETS[preset].h);
+      form.append("quality", quality);
 
-        o += metrics.originalSize || 0;
-        n += metrics.newSize || 0;
+      const res = await fetch("/api/process", {
+        method: "POST",
+        body: form,
+      });
 
-        return { ...item, resultBlob: blob };
-      })
-    );
+      const blob = await res.blob();
+      updated.push({ ...file, resultBlob: blob });
 
-    setFiles(processed);
+      doneCount++;
+      setProgress(Math.round((doneCount / files.length) * 100));
+    }
+
+    setFiles(updated);
     setProcessing(false);
-    setTotalSaved({ orig: o, newSize: n });
   };
 
   const downloadZip = async () => {
+    const ready = files.filter((f) => f.resultBlob);
+
     const zip = new JSZip();
-    for (const f of files.filter((x) => x.resultBlob)) {
+    for (const f of ready) {
       const buf = await f.resultBlob.arrayBuffer();
-      zip.file(f.file.name.replace(/\.[^.]+$/, "") + "-optimized.jpg", buf);
+      const name = f.file.name.replace(/\.[^.]+$/, "");
+      zip.file(`${name}-optimized.jpg`, buf);
     }
+
     const blob = await zip.generateAsync({ type: "blob" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
@@ -80,6 +92,8 @@ export default function ResizerPage() {
 
   return (
     <div className="relative min-h-screen flex items-center justify-center bg-black overflow-hidden p-6">
+
+      {/* Sparkle Background */}
       <SparklesCore
         className="absolute inset-0 z-0 pointer-events-none"
         background="#000"
@@ -94,15 +108,22 @@ export default function ResizerPage() {
           Image Resizer & Optimizer
         </h1>
 
+        {/* DRAG + DROP */}
         <FileUpload key={resetKey} onChange={addFiles} />
 
+        {/* Preview grid */}
         {files.length > 0 && (
           <div className="grid grid-cols-3 gap-4">
             {files.map((f) => (
               <div key={f.id} className="flex flex-col items-center">
-                <img src={f.previewUrl} className="w-full h-24 object-cover rounded"/>
-                <button onClick={() => removeFile(f.id)}
-                  className="mt-1 text-xs bg-red-600 px-2 py-1 rounded">
+                <img
+                  src={f.previewUrl}
+                  className="w-full h-24 object-cover rounded"
+                />
+                <button
+                  onClick={() => removeFile(f.id)}
+                  className="mt-1 text-xs bg-red-600 px-2 py-1 rounded"
+                >
                   Remove
                 </button>
               </div>
@@ -110,6 +131,7 @@ export default function ResizerPage() {
           </div>
         )}
 
+        {/* Preset */}
         <div>
           <label>Preset</label>
           <select
@@ -118,42 +140,63 @@ export default function ResizerPage() {
             onChange={(e) => setPreset(e.target.value)}
           >
             {Object.keys(PRESETS).map((k) => (
-              <option key={k} value={k} className="text-black">
+              <option value={k} key={k} className="text-black">
                 {PRESETS[k].label}
               </option>
             ))}
           </select>
         </div>
 
+        {/* Quality */}
         <div>
           <label>Quality: {quality}%</label>
-          <input type="range" min={60} max={100} value={quality}
+          <input
+            type="range"
+            min={60}
+            max={100}
+            value={quality}
             onChange={(e) => setQuality(+e.target.value)}
             className="w-full cursor-pointer"
           />
         </div>
 
-        <div className="flex gap-2">
-          <button onClick={processAll} disabled={!files.length || processing}
-            className="flex-1 bg-blue-600 py-2 rounded">
-            {processing ? "Processing..." : "Process"}
+        {/* Progress bar */}
+        {processing && (
+          <div className="w-full bg-white/20 h-2 rounded overflow-hidden">
+            <div
+              style={{ width: `${progress}%` }}
+              className="h-full bg-blue-400 transition-all duration-300"
+            />
+          </div>
+        )}
+
+        {/* Buttons */}
+        <div className="flex gap-2 mt-4">
+          <button
+            onClick={processAll}
+            disabled={!files.length || processing}
+            className="flex-1 bg-blue-600 py-2 rounded disabled:opacity-50"
+          >
+            {processing ? "Processing…" : "Process"}
           </button>
 
-          <button onClick={downloadZip} disabled={!files.some((f) => f.resultBlob)}
-            className="flex-1 bg-green-600 py-2 rounded">
-            Download
-          </button>
+          {/* Download appears ONLY when all files processed */}
+          {files.length > 0 && files.every((f) => f.resultBlob) && (
+            <button
+              onClick={downloadZip}
+              className="flex-1 bg-green-600 py-2 rounded"
+            >
+              Download
+            </button>
+          )}
 
-          <button onClick={resetAll} className="flex-1 bg-gray-700 py-2 rounded">
+          <button
+            onClick={resetAll}
+            className="flex-1 bg-gray-700 py-2 rounded"
+          >
             Reset
           </button>
         </div>
-
-        {totalSaved && (
-          <p className="text-center text-green-400 font-medium">
-            Saved {(totalSaved.orig/1024/1024).toFixed(2)}MB → {(totalSaved.newSize/1024/1024).toFixed(2)}MB
-          </p>
-        )}
       </div>
     </div>
   );
