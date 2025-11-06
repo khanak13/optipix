@@ -17,36 +17,66 @@ export default function handler(req, res) {
 
   form.parse(req, async (err, fields, files) => {
     if (err) {
-      return res.status(500).json({ error: "Error parsing form data" });
+      return res.status(500).json({ error: "Form parse error" });
     }
 
     const file = files.file;
+
+    if (!file) {
+      return res.status(400).json({ error: "No file received" });
+    }
+
+    const buffer = fs.readFileSync(file.filepath);
+
+    // ✅ Validate input buffer (fixes Safari empty files)
+    if (!buffer || buffer.length < 50) {
+      return res.status(400).json({
+        error: "Uploaded file is empty or corrupted",
+      });
+    }
+
     const width = Number(fields.width);
     const height = Number(fields.height);
     const quality = Number(fields.quality);
 
-    const buffer = fs.readFileSync(file.filepath);
-    const originalSize = buffer.length;
-
     try {
-      const resultBuffer = await sharp(buffer)
+      // ✅ Sharp conversion with HEIC/HEIF → JPEG
+      let sharpImage = sharp(buffer, { failOnError: false });
+
+      const metadata = await sharpImage.metadata();
+
+      if (!metadata || !metadata.format) {
+        return res.status(400).json({
+          error: "Unsupported or unreadable image format",
+        });
+      }
+
+      // ✅ Resize without cropping
+      const resultBuffer = await sharpImage
         .resize({
-          width: width,
-          height: height,
-          fit: "inside",          // ✅ no cropping
-          withoutEnlargement: true
+          width,
+          height,
+          fit: "inside",
+          withoutEnlargement: true,
         })
         .jpeg({ quality })
         .toBuffer();
 
-      const newSize = resultBuffer.length;
+      res.setHeader(
+        "X-metrics",
+        JSON.stringify({
+          originalSize: buffer.length,
+          newSize: resultBuffer.length,
+        })
+      );
 
-      res.setHeader("x-metrics", JSON.stringify({ originalSize, newSize }));
-      res.status(200).send(resultBuffer);
-
+      return res.status(200).send(resultBuffer);
     } catch (error) {
-      console.log(error);
-      res.status(500).json({ error: "Image processing failed." });
+      console.error("PROCESSING ERROR →", error);
+
+      return res.status(500).json({
+        error: "Processing failed. Unsupported image format.",
+      });
     }
   });
 }
